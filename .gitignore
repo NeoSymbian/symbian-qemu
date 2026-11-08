@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+# QEMU keeps its own rules in qemu/.gitignore (qemu/build/ and the like).
+
+# A QEMU build at the top (README: mkdir build && ../qemu/configure ...)
+/build/
+/build-*/
+
+# Python (run-syborg --self-test, syborg-view.py)
+__pycache__/
+*.pyc
+
+# What run-syborg writes or reads when run from the checkout
+*.rom
+*.img
+*.ppm
+serial*.log
+/snap/
+
+# Editors and macOS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
