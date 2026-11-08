@@ -31,7 +31,9 @@ With `LIVE=1` it runs in the background: VNC on port 5900 (any VNC viewer shows 
 touches), the QEMU monitor on port 4444.
 
 Directly with QEMU: `qemu-system-arm -M syborg,width=768,height=640 -kernel minigui.rom
--drive if=mtd,format=raw,file=c_drive.img -serial stdio`.
+-drive if=mtd,format=raw,file=c_drive.img -serial stdio`. Add `hostfs=DIR` to the `-M` options to give the
+guest a host folder as its E: drive (the ROM needs `svphostfsdriver.ldd`, `svphostfsy.fsy` and `svphostfs.exe`,
+which mount it at start-up); the guest cannot reach outside DIR.
 
 ## Building QEMU
 
