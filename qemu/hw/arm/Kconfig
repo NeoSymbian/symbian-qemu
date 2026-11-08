@@ -243,6 +243,14 @@ config SX1
     depends on TCG && ARM
     select OMAP
 
+config SYBORG
+    bool
+    default y
+    depends on TCG && ARM
+    select FRAMEBUFFER
+    select PTIMER
+    select UNIMP
+
 config VERSATILE
     bool
     default y
