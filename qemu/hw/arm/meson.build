@@ -108,6 +108,9 @@ arm_common_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2838_peripherals.c'))
 arm_common_ss.add(when: 'CONFIG_STRONGARM', if_true: files('strongarm.c'))
 arm_common_ss.add(when: 'CONFIG_SX1', if_true: files('omap_sx1.c'))
 arm_common_ss.add(when: 'CONFIG_SYBORG', if_true: files('syborg.c', 'syborg_periph.c'))
+if host_os != 'windows'
+  arm_common_ss.add(when: 'CONFIG_SYBORG', if_true: files('syborg_hostfs.c'))
+endif
 arm_common_ss.add(when: 'CONFIG_VERSATILE', if_true: files('versatilepb.c'))
 arm_common_ss.add(when: 'CONFIG_VEXPRESS', if_true: files('vexpress.c'))
 

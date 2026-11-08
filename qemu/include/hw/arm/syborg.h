@@ -31,4 +31,7 @@
 #define TYPE_SYBORG_PLATFORM  "syborg-platform"
 #define TYPE_SYBORG_HOSTFS    "syborg-hostfs"
 
+/* hostfs is drive-number 5 in the device tree (as in the 0.9.1 DTS): the guest's E: */
+#define SYBORG_HOSTFS_DRIVE   5
+
 #endif

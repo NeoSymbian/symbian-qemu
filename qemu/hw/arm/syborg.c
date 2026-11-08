@@ -13,7 +13,8 @@
  *
  * The ROM is loaded with -kernel as a raw image at 0x10000 behind the ARM boot stub, as on the
  * Symbian Foundation's QEMU 0.9.1. Options: -M syborg,width=W,height=H (screen, 768x640 default),
- * -drive if=mtd,format=raw,file=c.img (C:), -serial ... (serial 0 is the kernel's debug port).
+ * -drive if=mtd,format=raw,file=c.img (C:), -serial ... (serial 0 is the kernel's debug port),
+ * -M syborg,hostfs=DIR (host folder DIR as the guest's E:, via svphostfs; POSIX hosts only).
  *
  * Copyright (c) 2008 CodeSourcery
  * Copyright (c) 2026 The NeoSymbian Authors
@@ -113,6 +114,7 @@ struct SyborgMachineState {
     MachineState parent_obj;
     uint32_t width;
     uint32_t height;
+    char *hostfs;
 };
 
 static struct arm_boot_info syborg_binfo;
@@ -166,7 +168,17 @@ static void syborg_init(MachineState *machine)
         syborg_map(dev, 0xc0006000 + i * 0x1000, IRQ(5 + i));
     }
 
-    create_unimplemented_device("syborg-hostfs", 0xc000a000, 0x1000);
+    if (sms->hostfs) {
+        dev = qdev_try_new(TYPE_SYBORG_HOSTFS);
+        if (!dev) {
+            error_report("syborg: hostfs needs a POSIX host");
+            exit(1);
+        }
+        qdev_prop_set_string(dev, "path", sms->hostfs);
+        syborg_map(dev, 0xc000a000, NULL);
+    } else {
+        create_unimplemented_device("syborg-hostfs", 0xc000a000, 0x1000);
+    }
     create_unimplemented_device("syborg-snapshot", 0xc000b000, 0x1000);
     create_unimplemented_device("syborg-virtio-net", 0xc000c000, 0x1000);
     create_unimplemented_device("syborg-nand", 0xc000d000, 0x1000);
@@ -190,12 +202,34 @@ static void syborg_init(MachineState *machine)
         exit(1);
     }
     qemu_fdt_setprop_string(platform->fdt, "/", "compatible", "syborg");
+    if (sms->hostfs) {
+        /* what svphostfsdriver.ldd parses; svphostfs.exe (started by estart) mounts it */
+        qemu_fdt_add_subnode(platform->fdt, "/hostfs@c000a000");
+        qemu_fdt_setprop_string(platform->fdt, "/hostfs@c000a000", "compatible",
+                                "syborg,hostfs");
+        qemu_fdt_setprop_cell(platform->fdt, "/hostfs@c000a000", "reg", 0xc000a000);
+        qemu_fdt_setprop_cell(platform->fdt, "/hostfs@c000a000", "drive-number",
+                              SYBORG_HOSTFS_DRIVE);
+    }
     syborg_map(dev, 0xc0012000, NULL);
 #undef IRQ
 
     syborg_binfo.ram_size = machine->ram_size;
     syborg_binfo.board_id = 0;
     arm_load_kernel(ARM_CPU(cpuobj), machine, &syborg_binfo);
+}
+
+static char *syborg_get_hostfs(Object *obj, Error **errp)
+{
+    return g_strdup(SYBORG_MACHINE(obj)->hostfs);
+}
+
+static void syborg_set_hostfs(Object *obj, const char *value, Error **errp)
+{
+    SyborgMachineState *sms = SYBORG_MACHINE(obj);
+
+    g_free(sms->hostfs);
+    sms->hostfs = g_strdup(value);
 }
 
 static void syborg_machine_instance_init(Object *obj)
@@ -208,6 +242,8 @@ static void syborg_machine_instance_init(Object *obj)
     object_property_set_description(obj, "width", "Screen width in pixels (default 768)");
     object_property_add_uint32_ptr(obj, "height", &sms->height, OBJ_PROP_FLAG_READWRITE);
     object_property_set_description(obj, "height", "Screen height in pixels (default 640)");
+    object_property_add_str(obj, "hostfs", syborg_get_hostfs, syborg_set_hostfs);
+    object_property_set_description(obj, "hostfs", "Host folder shown to the guest as E:");
 }
 
 static void syborg_machine_class_init(ObjectClass *oc, const void *data)
