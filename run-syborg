@@ -10,7 +10,10 @@ environment (the same contract as the QEMU 0.9.1 image's run-syborg, plus the sc
   C_DRIVE    FAT image for C: (copied, the original stays as it is)
   SCREEN     WIDTHxHEIGHT of the screen                        default 768x640
   RUN        commands typed into ESHELL, comma-separated (a-z, 0-9), once the guest is ready
-  MONITOR    HMP monitor commands, ';'-separated, sent after RUN, MON_GAP seconds apart (default 1)
+  MONITOR    HMP monitor commands, ';'-separated, sent after RUN, MON_GAP seconds apart (default 1).
+             Two more commands: `wait N` sleeps N seconds; `expect TEXT` waits until TEXT appears
+             in the serial log after the previous expect's match (EXPECT_MAX seconds, default 30;
+             the run stops with status 124 if it does not)
   READY      regex in the serial log that means "ready for input"
              default: ESHELL started or neoui booted; READY_SETTLE seconds more (default 3)
   CMD_MAX    seconds one RUN command may take (default 60); it ends when the serial log has
@@ -206,6 +209,7 @@ def main():
 
     start = time.time()
     deadline = start + secs
+    qmp = None
     proc = subprocess.Popen(args, stdin=subprocess.DEVNULL)
     status = 0
     try:
@@ -273,8 +277,18 @@ def main():
                 if re.search(fault, serial.text):
                     break
             for line in monitor:
-                time.sleep(float(env("MON_GAP", "1")))
-                qmp.hmp(line)
+                if line.startswith("expect "):
+                    text = line[len("expect "):]
+                    end = serial.wait(re.escape(text), pos,
+                                      min(deadline, time.time() + float(env("EXPECT_MAX", "30"))))
+                    if end is None:
+                        raise TimeoutError(f"expect: {text!r} did not appear in the serial log")
+                    pos = end
+                elif line.startswith("wait "):
+                    time.sleep(float(line[len("wait "):]))
+                else:
+                    time.sleep(float(env("MON_GAP", "1")))
+                    qmp.hmp(line)
             time.sleep(float(env("LINGER", "2")))
             if time.time() > deadline:
                 raise TimeoutError(f"the script did not finish in {secs:.0f} s")
@@ -287,6 +301,12 @@ def main():
     except TimeoutError as e:
         print(f"run-syborg: {e}", file=sys.stderr)
         status = 124
+        try:                                            # keep the screen of the failed run
+            if fb:
+                qmp.cmd("screendump", filename=fb)
+            qmp.cmd("quit")
+        except Exception:
+            pass
     finally:
         try:
             proc.wait(timeout=5)
