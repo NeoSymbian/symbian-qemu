@@ -1,0 +1,39 @@
+name: image
+
+# Builds QEMU with the Syborg board (qemu/), runs its qtest and the runner's self-test inside the
+# image build, and publishes ghcr.io/neosymbian/symbian-qemu:
+#   push to main   -> :latest + :sha-<short>
+#   tag vX.Y.Z     -> :X.Y.Z + :latest + :sha-<short>
+#   pull request   -> build and tests only
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths: ['qemu/**', 'run-syborg', 'container/**', '.dockerignore', '.github/workflows/image.yml']
+  pull_request:
+    paths: ['qemu/**', 'run-syborg', 'container/**', '.dockerignore', '.github/workflows/image.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test
+        run: docker build -f container/Dockerfile -t neosymbian/symbian-qemu:ci .
+      - name: Publish
+        if: github.event_name != 'pull_request'
+        run: |
+          set -eu
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          tags="latest sha-${GITHUB_SHA::7}"
+          case "$GITHUB_REF" in refs/tags/v*) tags="$tags ${GITHUB_REF#refs/tags/v}" ;; esac
+          for t in $tags; do
+            docker tag neosymbian/symbian-qemu:ci "ghcr.io/neosymbian/symbian-qemu:$t"
+            docker push "ghcr.io/neosymbian/symbian-qemu:$t"
+          done
+          docker inspect --format '{{index .RepoDigests 0}}' "ghcr.io/neosymbian/symbian-qemu:latest"
