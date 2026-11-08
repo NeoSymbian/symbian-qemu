@@ -14,7 +14,8 @@ environment (the same contract as the QEMU 0.9.1 image's run-syborg, plus the sc
   READY      regex in the serial log that means "ready for input"
              default: ESHELL started or neoui booted; READY_SETTLE seconds more (default 3)
   CMD_MAX    seconds one RUN command may take (default 60); it ends when the serial log has
-             been quiet for QUIET seconds (default 2) after the command's process started
+             been quiet for QUIET seconds (default 2) after the command's process started, or
+             after START_MAX seconds (default 3) if no process starts (an ESHELL built-in)
   LINGER     seconds to keep running after the script (default 2)
   FAULT      regex that stops the run early (default: a kernel fault)
   LIVE=1     run until [seconds], HMP monitor on TCP 4444, VNC on 5900, FB refreshed every
@@ -262,10 +263,12 @@ def main():
                     qmp.cmd("send-key", keys=[{"type": "qcode", "data": k}])
                     time.sleep(0.05)
                 until = min(deadline, t0 + float(env("CMD_MAX", "60")))
-                started = serial.wait(rf"\[proc\] create {word.upper()}\.EXE", pos, until)
+                started = serial.wait(rf"\[proc\] create {word.upper()}\.EXE", pos,
+                                      min(until, t0 + float(env("START_MAX", "3"))))
                 if started is not None:
                     pos = started
-                serial.wait_quiet(float(env("QUIET", "2")), until)
+                    serial.wait_quiet(float(env("QUIET", "2")), until)
+                # else: an ESHELL built-in such as dir, or no ESHELL (the neoui ROM): nothing to wait for
                 print(f"run-syborg: {word} took {time.time() - t0:.1f} s", flush=True)
                 if re.search(fault, serial.text):
                     break
