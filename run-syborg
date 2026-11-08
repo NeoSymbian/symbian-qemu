@@ -18,7 +18,8 @@ environment (the same contract as the QEMU 0.9.1 image's run-syborg, plus the sc
   LINGER     seconds to keep running after the script (default 2)
   FAULT      regex that stops the run early (default: a kernel fault)
   LIVE=1     run until [seconds], HMP monitor on TCP 4444, VNC on 5900, FB refreshed every
-             FB_INTERVAL seconds (default 0.2)
+             FB_INTERVAL seconds (default 0.2). Both listen on LISTEN (default 127.0.0.1; neither
+             has a password, so use 0.0.0.0 only inside a container that publishes them on localhost)
   SNAPSHOT   directory: the first run saves the machine once READY (plus READY_SETTLE), later
              runs of the same ROM, C: image and QEMU start from there in about a second
   QEMU       the qemu-system-arm binary                        default qemu-system-arm on PATH
@@ -167,6 +168,7 @@ def main():
     fault = env("FAULT", r"K::Fault|Kern::Fault")
     qemu = env("QEMU", "qemu-system-arm")
     snapdir = env("SNAPSHOT")
+    listen = env("LISTEN", "127.0.0.1")
     m = re.fullmatch(r"(\d+)x(\d+)", screen)
     if not m:
         sys.exit(f"SCREEN: WIDTHxHEIGHT, not {screen!r}")
@@ -178,10 +180,10 @@ def main():
     args = [qemu, "-M", f"syborg,width={m[1]},height={m[2]}", "-kernel", rom,
             "-chardev", f"file,id=ser0,path={serial_path},append=on", "-serial", "chardev:ser0",
             "-qmp", f"unix:{qmp_path},server=on,wait=off",
-            "-monitor", "tcp:0.0.0.0:4444,server=on,wait=off" if live else "none",
+            "-monitor", f"tcp:{listen}:4444,server=on,wait=off" if live else "none",
             "-display", "none"]
     if live:
-        args += ["-vnc", "0.0.0.0:0"]
+        args += ["-vnc", f"{listen}:0"]
 
     c_drive = env("C_DRIVE")
     c_copy = os.path.join(tmp, "c.img")
