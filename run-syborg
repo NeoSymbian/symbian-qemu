@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""run-syborg <rom> [seconds] -- boot a Symbian ROM on QEMU's Syborg board and drive it.
+
+Event-driven: instead of fixed sleeps it watches the serial log. Everything is set through the
+environment (the same contract as the QEMU 0.9.1 image's run-syborg, plus the script variables):
+
+  SERIAL     serial port 0 (the kernel's debug output)        default /work/serial.log
+  FB         screen as a P6 PPM, written at the end            default /work/fb.ppm
+  C_DRIVE    FAT image for C: (copied, the original stays as it is)
+  SCREEN     WIDTHxHEIGHT of the screen                        default 768x640
+  RUN        commands typed into ESHELL, comma-separated (a-z, 0-9), once the guest is ready
+  MONITOR    HMP monitor commands, ';'-separated, sent after RUN, MON_GAP seconds apart (default 1)
+  READY      regex in the serial log that means "ready for input"
+             default: ESHELL started or neoui booted; READY_SETTLE seconds more (default 3)
+  CMD_MAX    seconds one RUN command may take (default 60); it ends when the serial log has
+             been quiet for QUIET seconds (default 2) after the command's process started
+  LINGER     seconds to keep running after the script (default 2)
+  FAULT      regex that stops the run early (default: a kernel fault)
+  LIVE=1     run until [seconds], HMP monitor on TCP 4444, VNC on 5900, FB refreshed every
+             FB_INTERVAL seconds (default 0.2)
+  SNAPSHOT   directory: the first run saves the machine once READY (plus READY_SETTLE), later
+             runs of the same ROM, C: image and QEMU start from there in about a second
+  QEMU       the qemu-system-arm binary                        default qemu-system-arm on PATH
+
+Without RUN or MONITOR, lines on stdin are sent to the HMP monitor (e.g. `sendkey d`), and the
+guest runs for [seconds] (default 60). Exit status: 0, or 3 when FAULT matched, 124 on timeout
+while a script was still running.
+"""
+import hashlib
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+env = os.environ.get
+
+
+def keys_for(word):
+    """QEMU qcodes that type `word` and press return.
+
+    >>> keys_for("dir")
+    ['d', 'i', 'r', 'ret']
+    >>> keys_for("neo1")
+    ['n', 'e', 'o', '1', 'ret']
+    """
+    if not re.fullmatch(r"[a-z0-9]+", word):
+        raise ValueError(f"RUN: only a-z and 0-9 can be typed, not {word!r}")
+    return list(word) + ["ret"]
+
+
+class Qmp:
+    """A minimal QMP client: one command at a time, events are skipped."""
+
+    def __init__(self, path, deadline):
+        while True:
+            try:
+                self.sock = socket.socket(socket.AF_UNIX)
+                self.sock.connect(path)
+                break
+            except OSError:
+                if time.time() > deadline:
+                    raise
+                time.sleep(0.05)
+        self.file = self.sock.makefile("rwb")
+        self._recv()                                    # greeting
+        self.cmd("qmp_capabilities")
+        self.lock = threading.Lock()
+
+    def _recv(self):
+        while True:
+            line = self.file.readline()
+            if not line:
+                raise EOFError("QEMU closed QMP")
+            msg = json.loads(line)
+            if "event" not in msg:
+                return msg
+
+    def cmd(self, name, **args):
+        lock = getattr(self, "lock", None)
+        if lock:
+            lock.acquire()
+        try:
+            self.file.write(json.dumps({"execute": name, "arguments": args}).encode() + b"\n")
+            self.file.flush()
+            msg = self._recv()
+        finally:
+            if lock:
+                lock.release()
+        if "error" in msg:
+            raise RuntimeError(f"{name}: {msg['error'].get('desc')}")
+        return msg.get("return")
+
+    def hmp(self, line):
+        return self.cmd("human-monitor-command", **{"command-line": line})
+
+
+class Serial:
+    """Follows the serial log file QEMU writes."""
+
+    def __init__(self, path):
+        self.path, self.text, self.changed = path, "", time.time()
+
+    def poll(self):
+        try:
+            with open(self.path, "rb") as f:
+                f.seek(len(self.text.encode("utf-8", "surrogateescape")))
+                new = f.read().decode("utf-8", "surrogateescape")
+        except FileNotFoundError:
+            return
+        if new:
+            self.text += new
+            self.changed = time.time()
+
+    def wait(self, pattern, start, until):
+        """Wait for `pattern` after offset `start`; returns the match end or None at `until`."""
+        rx = re.compile(pattern)
+        while time.time() < until:
+            self.poll()
+            m = rx.search(self.text, start)
+            if m:
+                return m.end()
+            time.sleep(0.05)
+        return None
+
+    def wait_quiet(self, quiet, until):
+        while time.time() < until:
+            self.poll()
+            if time.time() - self.changed >= quiet:
+                return True
+            time.sleep(0.05)
+        return False
+
+
+def fingerprint(paths, qemu):
+    h = hashlib.sha256()
+    for p in paths + [shutil.which(qemu) or qemu]:
+        with open(p, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block)
+    return h.hexdigest()[:16]
+
+
+def main():
+    if sys.argv[1:] == ["--self-test"]:
+        import doctest
+        return doctest.testmod().failed
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print(__doc__)
+        return 0 if len(sys.argv) > 1 else 2
+    rom = sys.argv[1]
+    secs = float(sys.argv[2]) if len(sys.argv) > 2 else 60.0
+    serial_path = env("SERIAL", "/work/serial.log")
+    fb = env("FB", "/work/fb.ppm")
+    screen = env("SCREEN", "768x640")
+    live = env("LIVE", "0") == "1"
+    run = [w for w in env("RUN", "").split(",") if w]
+    monitor = [m.strip() for m in env("MONITOR", "").split(";") if m.strip()]
+    scripted = bool(run or monitor)
+    ready = env("READY", r"\[proc\] create ESHELL\.EXE|neoui: boot OK")
+    fault = env("FAULT", r"K::Fault|Kern::Fault")
+    qemu = env("QEMU", "qemu-system-arm")
+    snapdir = env("SNAPSHOT")
+    m = re.fullmatch(r"(\d+)x(\d+)", screen)
+    if not m:
+        sys.exit(f"SCREEN: WIDTHxHEIGHT, not {screen!r}")
+    for w in run:
+        keys_for(w)                                     # validate before booting
+
+    tmp = tempfile.mkdtemp(prefix="syborg-")
+    qmp_path = os.path.join(tmp, "qmp.sock")
+    args = [qemu, "-M", f"syborg,width={m[1]},height={m[2]}", "-kernel", rom,
+            "-chardev", f"file,id=ser0,path={serial_path},append=on", "-serial", "chardev:ser0",
+            "-qmp", f"unix:{qmp_path},server=on,wait=off",
+            "-monitor", "tcp:0.0.0.0:4444,server=on,wait=off" if live else "none",
+            "-display", "none"]
+    if live:
+        args += ["-vnc", "0.0.0.0:0"]
+
+    c_drive = env("C_DRIVE")
+    c_copy = os.path.join(tmp, "c.img")
+    snap_state = snap_c = key = None
+    restore = False
+    if snapdir:
+        key = fingerprint([rom] + ([c_drive] if c_drive else []), qemu)
+        snap_state = os.path.join(snapdir, f"{key}.state")
+        snap_c = os.path.join(snapdir, f"{key}.c.img")
+        restore = os.path.exists(snap_state) and (not c_drive or os.path.exists(snap_c))
+    if c_drive:
+        shutil.copyfile(snap_c if restore else c_drive, c_copy)
+        args += ["-drive", f"if=mtd,format=raw,file={c_copy}"]
+    if restore:
+        args += ["-incoming", f"file:{snap_state}"]
+        shutil.copyfile(snap_state + ".serial", serial_path)
+    elif os.path.exists(serial_path):
+        os.remove(serial_path)
+
+    start = time.time()
+    deadline = start + secs
+    proc = subprocess.Popen(args, stdin=subprocess.DEVNULL)
+    status = 0
+    try:
+        qmp = Qmp(qmp_path, start + 10)
+        serial = Serial(serial_path)
+        if restore:
+            while qmp.cmd("query-status")["status"] == "inmigrate":
+                time.sleep(0.02)
+            qmp.cmd("cont")
+            print(f"run-syborg: restored snapshot {key} in {time.time() - start:.1f} s", flush=True)
+
+        if not scripted:
+            if not sys.stdin.isatty():
+                def forward():
+                    for line in sys.stdin:
+                        if line.strip():
+                            qmp.hmp(line.strip())
+                threading.Thread(target=forward, daemon=True).start()
+            last_fb = 0.0
+            interval = float(env("FB_INTERVAL", "0.2" if live else "0"))
+            while proc.poll() is None and time.time() < deadline:
+                if interval and time.time() - last_fb >= interval:
+                    qmp.cmd("screendump", filename=fb)
+                    last_fb = time.time()
+                time.sleep(0.05)
+        else:
+            pos = 0
+            if not restore:
+                pos = serial.wait(ready, 0, deadline)
+                if pos is None:
+                    raise TimeoutError(f"READY ({ready}) not seen")
+                time.sleep(float(env("READY_SETTLE", "3")))
+                print(f"run-syborg: ready after {time.time() - start:.1f} s", flush=True)
+                if snapdir:
+                    os.makedirs(snapdir, exist_ok=True)
+                    qmp.cmd("stop")
+                    qmp.cmd("migrate", uri=f"file:{snap_state}.tmp")
+                    while qmp.cmd("query-migrate").get("status") not in ("completed", "failed"):
+                        time.sleep(0.05)
+                    if c_drive:
+                        shutil.copyfile(c_copy, snap_c)
+                    os.replace(snap_state + ".tmp", snap_state)
+                    serial.poll()
+                    with open(snap_state + ".serial", "w", encoding="utf-8",
+                              errors="surrogateescape") as f:
+                        f.write(serial.text)
+                    qmp.cmd("cont")
+                    print(f"run-syborg: saved snapshot {key}", flush=True)
+            else:
+                serial.poll()
+                pos = len(serial.text)
+            for word in run:
+                t0 = time.time()
+                for k in keys_for(word):
+                    qmp.cmd("send-key", keys=[{"type": "qcode", "data": k}])
+                    time.sleep(0.05)
+                until = min(deadline, t0 + float(env("CMD_MAX", "60")))
+                started = serial.wait(rf"\[proc\] create {word.upper()}\.EXE", pos, until)
+                if started is not None:
+                    pos = started
+                serial.wait_quiet(float(env("QUIET", "2")), until)
+                print(f"run-syborg: {word} took {time.time() - t0:.1f} s", flush=True)
+                if re.search(fault, serial.text):
+                    break
+            for line in monitor:
+                time.sleep(float(env("MON_GAP", "1")))
+                qmp.hmp(line)
+            time.sleep(float(env("LINGER", "2")))
+            if time.time() > deadline:
+                raise TimeoutError(f"the script did not finish in {secs:.0f} s")
+        serial.poll()
+        if re.search(fault, serial.text):
+            status = 3
+        if fb:
+            qmp.cmd("screendump", filename=fb)
+        qmp.cmd("quit")
+    except TimeoutError as e:
+        print(f"run-syborg: {e}", file=sys.stderr)
+        status = 124
+    finally:
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        shutil.rmtree(tmp, ignore_errors=True)
+    print(f"run-syborg: {time.time() - start:.1f} s", flush=True)
+    return status
+
+
+if __name__ == "__main__":
+    sys.exit(main())
