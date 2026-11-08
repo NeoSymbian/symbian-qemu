@@ -29,7 +29,8 @@ and `SNAPSHOT=/work/snap` keeps the booted machine, so later runs of the same RO
 `run-syborg --help` lists everything.
 
 With `LIVE=1` it runs in the background: VNC on port 5900 (any VNC viewer shows the screen and takes keys and
-touches), the QEMU monitor on port 4444. Without a VNC viewer, `python3 syborg-view.py fb.ppm` opens a window on the
+touches), the QEMU monitor on port 4444. macOS Screen Sharing only connects with a password: set `VNC_PASSWORD`
+(at most 8 characters; `neo live` uses `symbian`). VNC passwords are weak, so keep the ports on localhost. Without a VNC viewer, `python3 syborg-view.py fb.ppm` opens a window on the
 screen dump and sends keys and touches through the monitor.
 
 Directly with QEMU: `qemu-system-arm -M syborg,width=768,height=640 -kernel minigui.rom

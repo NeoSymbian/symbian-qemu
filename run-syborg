@@ -24,6 +24,8 @@ environment (the same contract as the QEMU 0.9.1 image's run-syborg, plus the sc
   LIVE=1     run until [seconds], HMP monitor on TCP 4444, VNC on 5900, FB refreshed every
              FB_INTERVAL seconds (default 0.2). Both listen on LISTEN (default 127.0.0.1; neither
              has a password, so use 0.0.0.0 only inside a container that publishes them on localhost)
+  VNC_PASSWORD  with LIVE=1: VNC asks for this password (1-8 characters; macOS Screen Sharing will not
+             connect without one). VNC passwords are weak: it is not a reason to listen beyond localhost
   SNAPSHOT   directory: the first run saves the machine once READY (plus READY_SETTLE), later
              runs of the same ROM, C: image and QEMU start from there in about a second
   QEMU       the qemu-system-arm binary                        default qemu-system-arm on PATH
@@ -173,6 +175,9 @@ def main():
     qemu = env("QEMU", "qemu-system-arm")
     snapdir = env("SNAPSHOT")
     listen = env("LISTEN", "127.0.0.1")
+    vnc_password = env("VNC_PASSWORD")
+    if vnc_password and not 1 <= len(vnc_password) <= 8:
+        sys.exit("VNC_PASSWORD: 1 to 8 characters (VNC uses only the first 8)")
     m = re.fullmatch(r"(\d+)x(\d+)", screen)
     if not m:
         sys.exit(f"SCREEN: WIDTHxHEIGHT, not {screen!r}")
@@ -187,7 +192,7 @@ def main():
             "-monitor", f"tcp:{listen}:4444,server=on,wait=off" if live else "none",
             "-display", "none"]
     if live:
-        args += ["-vnc", f"{listen}:0"]
+        args += ["-vnc", f"{listen}:0" + (",password=on" if vnc_password else "")]
 
     c_drive = env("C_DRIVE")
     c_copy = os.path.join(tmp, "c.img")
@@ -214,6 +219,8 @@ def main():
     status = 0
     try:
         qmp = Qmp(qmp_path, start + 10)
+        if live and vnc_password:
+            qmp.cmd("set_password", protocol="vnc", password=vnc_password)   # until set, VNC refuses everyone
         serial = Serial(serial_path)
         if restore:
             while qmp.cmd("query-status")["status"] == "inmigrate":
