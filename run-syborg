@@ -29,6 +29,9 @@ environment (the same contract as the QEMU 0.9.1 image's run-syborg, plus the sc
   SNAPSHOT   directory: the first run saves the machine once READY (plus READY_SETTLE), later
              runs of the same ROM, C: image and QEMU start from there in about a second
   QEMU       the qemu-system-arm binary                        default qemu-system-arm on PATH
+  CPU        the -cpu model                                    default max,has_el2=off
+             (an ARMv8-A AArch32 CPU: the user side is built for ARMv8, docs user-side-smp.md; the 2010
+             Syborg kernel runs on it as on the board's own Cortex-A8; has_el2=off: reset in SVC, not Hyp)
 
 Without RUN or MONITOR, lines on stdin are sent to the HMP monitor (e.g. `sendkey d`), and the
 guest runs for [seconds] (default 60). Exit status: 0, or 3 when FAULT matched, 124 on timeout
@@ -145,8 +148,8 @@ class Serial:
         return False
 
 
-def fingerprint(paths, qemu):
-    h = hashlib.sha256()
+def fingerprint(paths, qemu, cpu):
+    h = hashlib.sha256(cpu.encode())                    # a snapshot of one CPU model doesn't restore on another
     for p in paths + [shutil.which(qemu) or qemu]:
         with open(p, "rb") as f:
             for block in iter(lambda: f.read(1 << 20), b""):
@@ -173,6 +176,7 @@ def main():
     ready = env("READY", r"\[proc\] create ESHELL\.EXE|neoui: boot OK")
     fault = env("FAULT", r"K::Fault|Kern::Fault")
     qemu = env("QEMU", "qemu-system-arm")
+    cpu = env("CPU", "max,has_el2=off")
     snapdir = env("SNAPSHOT")
     listen = env("LISTEN", "127.0.0.1")
     vnc_password = env("VNC_PASSWORD")
@@ -186,7 +190,7 @@ def main():
 
     tmp = tempfile.mkdtemp(prefix="syborg-")
     qmp_path = os.path.join(tmp, "qmp.sock")
-    args = [qemu, "-M", f"syborg,width={m[1]},height={m[2]}", "-kernel", rom,
+    args = [qemu, "-cpu", cpu, "-M", f"syborg,width={m[1]},height={m[2]}", "-kernel", rom,
             "-chardev", f"file,id=ser0,path={serial_path},append=on", "-serial", "chardev:ser0",
             "-qmp", f"unix:{qmp_path},server=on,wait=off",
             "-monitor", f"tcp:{listen}:4444,server=on,wait=off" if live else "none",
@@ -199,7 +203,7 @@ def main():
     snap_state = snap_c = key = None
     restore = False
     if snapdir:
-        key = fingerprint([rom] + ([c_drive] if c_drive else []), qemu)
+        key = fingerprint([rom] + ([c_drive] if c_drive else []), qemu, cpu)
         snap_state = os.path.join(snapdir, f"{key}.state")
         snap_c = os.path.join(snapdir, f"{key}.c.img")
         restore = os.path.exists(snap_state) and (not c_drive or os.path.exists(snap_c))
